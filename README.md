@@ -13,7 +13,7 @@ git clone https://github.com/zhaohb/mamba_ov.git
 pip install openvino_dev 
 
 Additional Operations
-1. download mamba-2.8b-hf model(The model: [Model link](https://hf-mirror.com/state-spaces/mamba-2.8b-hf))
+1. download mamba-2.8b-hf model
 2. Copy all files under mamba-2.8b to the mamba-2.8b-hf directory
 ```
 ### Convert mamba-2.8b model to OpenVINO™ IR(Intermediate Representation) and testing:
