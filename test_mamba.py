@@ -9,7 +9,7 @@ from ov_mamba import OVMambaForCausalLM, MambaModel
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser("Export InternVL2 Model to IR", add_help=True)
+    parser = argparse.ArgumentParser("Export mamba-2.8b Model to IR", add_help=True)
     parser.add_argument("-m", "--model_id", required=False, help="model_id or directory for loading")
     parser.add_argument("-ov", "--ov_ir_dir", required=True, help="output directory for saving model")
     parser.add_argument('-d', '--device', default='CPU', help='inference device')
