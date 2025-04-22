@@ -5,7 +5,7 @@ import openvino as ov
 from pathlib import Path
 
 import numpy as np
-from ov_mamba import OVMambaForCausalLM, MambaModel
+from ov_mamba import OVMambaForCausalLM, MambaModel, Mamba_OV
 
 if __name__ == '__main__':
 
@@ -16,6 +16,8 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--prompt', default="Hey how are you doing?", help='prompt')
     parser.add_argument('-max', '--max_new_tokens', default=10, help='max_new_tokens')
     parser.add_argument('-llm_int4_com', '--llm_int4_compress', action="store_true", help='llm int4 weights compress')
+    parser.add_argument('-convert_model_only', '--convert_model_only', action="store_true", help='convert model to ov only, do not do inference test')
+
 
     args = parser.parse_args()
     model_id = args.model_id
@@ -24,30 +26,27 @@ if __name__ == '__main__':
     max_new_tokens = args.max_new_tokens
     question = args.prompt
     llm_int4_compress = args.llm_int4_compress
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
+    convert_model_only=args.convert_model_only
 
     if not Path(ov_model_path).exists():
-        mamba_ov = MambaModel(model=model, tokenizer=tokenizer, ov_model_path=ov_model_path, device=device, int4_compress=llm_int4_compress)
-        mamba_ov.convert_ov()
-        mamba_ov.convert_past_ov()
+        mamba_ov = Mamba_OV(pretrained_model_path=model_id, ov_model_path=ov_model_path, device=device, llm_int4_compress=llm_int4_compress)
+        mamba_ov.export_vision_to_ov()
         del mamba_ov.model
         del mamba_ov.tokenizer
         del mamba_ov
-    elif Path(ov_model_path).exists() and llm_int4_compress is True and not Path(f"{ov_model_path}/ov_mamba_int4.xml").exists():
-        mamba_ov = MambaModel(model=model, tokenizer=tokenizer, ov_model_path=ov_model_path, device=device, int4_compress=llm_int4_compress)
-        mamba_ov.convert_ov()
-        mamba_ov.convert_past_ov()
+    elif Path(ov_model_path).exists() and llm_int4_compress is True and not Path(f"{ov_model_path}/llm_stateful_int4.xml").exists():
+        mamba_ov = Mamba_OV(pretrained_model_path=model_id, ov_model_path=ov_model_path, device=device, llm_int4_compress=llm_int4_compress)
+        mamba_ov.export_vision_to_ov()
         del mamba_ov.model
         del mamba_ov.tokenizer
         del mamba_ov
-    del model, tokenizer
 
     core = ov.Core()
     ov_mamba_model = OVMambaForCausalLM(ov_model_path=ov_model_path, core=core)
     input_ids = ov_mamba_model.tokenizer(question, return_tensors="pt")["input_ids"]
-    out = ov_mamba_model.generate(input_ids, max_new_tokens=max_new_tokens)
+    print("input_ids: ", input_ids)
+    inputs_embeds = ov_mamba_model.get_input_embeds(input_ids=input_ids)
+    out = ov_mamba_model.generate(inputs_embeds=inputs_embeds, max_new_tokens=max_new_tokens)
     print(out)
     print(ov_mamba_model.tokenizer.batch_decode(out))
 
