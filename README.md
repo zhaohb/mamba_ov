@@ -11,6 +11,7 @@
 ```bash
 git clone https://github.com/zhaohb/mamba_ov.git
 pip install openvino_dev 
+pip install transformers==4.39.0
 
 Additional Operations
 1. download mamba-2.8b-hf model
