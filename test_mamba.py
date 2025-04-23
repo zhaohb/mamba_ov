@@ -14,7 +14,7 @@ if __name__ == '__main__':
     parser.add_argument("-ov", "--ov_ir_dir", required=True, help="output directory for saving model")
     parser.add_argument('-d', '--device', default='CPU', help='inference device')
     parser.add_argument('-p', '--prompt', default="Hey how are you doing?", help='prompt')
-    parser.add_argument('-max', '--max_new_tokens', default=10, help='max_new_tokens')
+    parser.add_argument('-max', '--max_new_tokens', default=16, help='max_new_tokens')
     parser.add_argument('-llm_int4_com', '--llm_int4_compress', action="store_true", help='llm int4 weights compress')
     parser.add_argument('-convert_model_only', '--convert_model_only', action="store_true", help='convert model to ov only, do not do inference test')
 
