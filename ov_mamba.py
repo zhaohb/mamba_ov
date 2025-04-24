@@ -8,6 +8,7 @@ from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import ModelOutput
 from typing import Optional, Tuple, List, Union, Dict, Any
 import time
+import types
 import numpy as np
 from dataclasses import dataclass
 from openvino.runtime import opset13
@@ -107,7 +108,7 @@ class MambaModel():
         return [ 'inputs_embeds',]
     
     def get_past_input_names(self):
-        inputs = [ 'inputs_embeds']
+        inputs = [ 'input_ids', 'cache_position']
         for idx in range(64):
             inputs.append(f"past_ssm_states.{idx}")
         for idx in range(64):
@@ -115,7 +116,7 @@ class MambaModel():
         return inputs
 
     def get_output_names(self):
-        outputs = ['lm_logits']
+        outputs = ['logits']
         for idx in range(64):
             outputs.append(f"present_ssm_states.{idx}")
         for idx in range(64):
@@ -133,15 +134,26 @@ class MambaModel():
         
         language_model.config.torchscript = True
 
-        llm_input = torch.rand(( 1, 1, 2560), dtype=torch.float32)
-        logits, ssm_states, conv_states = language_model(inputs_embeds=llm_input, use_cache=True, return_dict=False)
-        # breakpoint()
+        # llm_input = torch.rand(( 1, 1, 2560), dtype=torch.float32)
+        # logits, ssm_states, conv_states = language_model(inputs_embeds=llm_input, use_cache=True, return_dict=False)
+        # # breakpoint()
+
+        past_ssm_states = [
+                torch.rand(1, 5120, 16, dtype=torch.float32)
+                for _ in range(64)
+            ]
+        past_conv_states = [
+                torch.rand(1, 5120, 4, dtype=torch.float32)
+                for _ in range(64)
+            ]
+    
         ov_model = ov.convert_model(
             language_model,
             example_input={
-                "inputs_embeds": llm_input,
-                "ssm_states": ssm_states,
-                "conv_states": conv_states,
+                "input_ids": torch.tensor([[187]]),
+                "cache_position": torch.tensor([0, 1, 2, 3]),
+                "past_ssm_states": past_ssm_states,
+                "past_conv_states": past_conv_states,
              },
         )
 
@@ -167,8 +179,8 @@ class MambaModel():
         ov_model.reshape(shapes)
         ov_model.validate_nodes_and_infer_types()
 
-        # print('mamba_model inputs: ', ov_model.inputs)
-        # print('mamba_model outputs: ', ov_model.outputs)
+        print('mamba_model inputs: ', ov_model.inputs)
+        print('mamba_model outputs: ', ov_model.outputs)
 
         # breakpoint()
         patch_stateful_ssm(ov_model)
@@ -379,10 +391,10 @@ class OVMambaForCausalLM(GenerationMixin):
         past_key_values = ((),)
         self.past_len += inputs_dict["inputs_embeds"].shape[1]
 
-        # print('logits: ', self.llm_request.get_tensor("lm_logits").data)
+        print('logits: ', self.llm_request.get_tensor("logits").data)
         return CausalLMOutputWithPast(
             loss=None,
-            logits=torch.from_numpy(self.llm_request.get_tensor("lm_logits").data),
+            logits=torch.from_numpy(self.llm_request.get_tensor("logits").data),
             past_key_values=past_key_values,
             hidden_states=None,
             attentions=None,
