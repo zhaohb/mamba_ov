@@ -13,7 +13,7 @@ if __name__ == '__main__':
     parser.add_argument("-m", "--model_id", required=False, help="model_id or directory for loading")
     parser.add_argument("-ov", "--ov_ir_dir", required=True, help="output directory for saving model")
     parser.add_argument('-d', '--device', default='CPU', help='inference device')
-    parser.add_argument('-p', '--prompt', default="Hey how are you doing?", help='prompt')
+    parser.add_argument('-p', '--prompt', default="Hey ,who you are?", help='prompt')
     parser.add_argument('-max', '--max_new_tokens', default=16, help='max_new_tokens')
     parser.add_argument('-llm_int4_com', '--llm_int4_compress', action="store_true", help='llm int4 weights compress')
     parser.add_argument('-convert_model_only', '--convert_model_only', action="store_true", help='convert model to ov only, do not do inference test')
@@ -45,8 +45,8 @@ if __name__ == '__main__':
     ov_mamba_model = OVMambaForCausalLM(ov_model_path=ov_model_path, core=core)
     input_ids = ov_mamba_model.tokenizer(question, return_tensors="pt")["input_ids"]
     print("input_ids: ", input_ids)
-    inputs_embeds = ov_mamba_model.get_input_embeds(input_ids=input_ids)
-    out = ov_mamba_model.generate(inputs_embeds=inputs_embeds, max_new_tokens=max_new_tokens)
+    # inputs_embeds = ov_mamba_model.get_input_embeds(input_ids=input_ids)
+    out = ov_mamba_model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens)
     print(out)
     print(ov_mamba_model.tokenizer.batch_decode(out))
 

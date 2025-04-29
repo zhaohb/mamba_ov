@@ -6,6 +6,7 @@ from pathlib import Path
 import nncf
 from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import ModelOutput
+from transformers.cache_utils import MambaCache
 from typing import Optional, Tuple, List, Union, Dict, Any
 import time
 import types
@@ -104,22 +105,22 @@ class MambaModel():
     def get_model(self):
         return self.model
 
-    def get_input_names(self):
-        return [ 'inputs_embeds',]
+    # def get_input_names(self):
+    #     return [ 'inputs_embeds',]
     
-    def get_past_input_names(self):
+    def get_input_names(self):
         inputs = [ 'input_ids', 'cache_position']
-        for idx in range(64):
+        for idx in range(self.model.config.num_hidden_layers):
             inputs.append(f"past_ssm_states.{idx}")
-        for idx in range(64):
+        for idx in range(self.model.config.num_hidden_layers):
             inputs.append(f"past_conv_states.{idx}")
         return inputs
 
     def get_output_names(self):
         outputs = ['logits']
-        for idx in range(64):
+        for idx in range(self.model.config.num_hidden_layers):
             outputs.append(f"present_ssm_states.{idx}")
-        for idx in range(64):
+        for idx in range(self.model.config.num_hidden_layers):
             outputs.append(f"present_conv_states.{idx}")
         return outputs
     
@@ -132,26 +133,28 @@ class MambaModel():
     def convert_stateful_ov(self):
         language_model = self.get_model()
         
-        language_model.config.torchscript = True
-
-        # llm_input = torch.rand(( 1, 1, 2560), dtype=torch.float32)
-        # logits, ssm_states, conv_states = language_model(inputs_embeds=llm_input, use_cache=True, return_dict=False)
-        # # breakpoint()
+        # language_model.config.torchscript = True
 
         past_ssm_states = [
-                torch.rand(1, 5120, 16, dtype=torch.float32)
-                for _ in range(64)
+                torch.rand(2, 5120, 16, dtype=torch.float32)
+                for _ in range(self.model.config.num_hidden_layers)
             ]
         past_conv_states = [
-                torch.rand(1, 5120, 4, dtype=torch.float32)
-                for _ in range(64)
+                torch.rand(2, 5120, 4, dtype=torch.float32)
+                for _ in range(self.model.config.num_hidden_layers)
             ]
     
+        input_ids = torch.tensor([[41328, 27042,  1230,  4217, 11686, 24707, 27775, 34687, 39179, 42198,
+                                    40809,  4124, 36307, 28789, 21264,  6422],
+                                  [26637,  5484, 29898,  1557, 31845,  1967,  2883, 49649, 17155,  1341,
+                                    43345,  1232, 32996, 48297,   905, 25175]])
+        cache_position = torch.tensor([ 6, 15, 14,  1])
+        # breakpoint()
         ov_model = ov.convert_model(
             language_model,
             example_input={
-                "input_ids": torch.tensor([[187]]),
-                "cache_position": torch.tensor([0, 1, 2, 3]),
+                "input_ids": input_ids,
+                "cache_position": cache_position,
                 "past_ssm_states": past_ssm_states,
                 "past_conv_states": past_conv_states,
              },
@@ -160,7 +163,7 @@ class MambaModel():
         # print('mamba_model inputs: ', ov_model.inputs)
         # print('mamba_model outputs: ', ov_model.outputs)
 
-        for input, input_name in zip(ov_model.inputs, self.get_past_input_names()):
+        for input, input_name in zip(ov_model.inputs, self.get_input_names()):
             input.get_tensor().set_names({input_name})
 
         for output, output_name in zip(ov_model.outputs, self.get_output_names()):
@@ -274,6 +277,71 @@ class Mamba_OV:
         self.llm_embed_model.convert_sdpa_ov()
         self.llm_stateful_model.convert_stateful_ov()
 
+class OVMambaCache(MambaCache):
+    def __init__(
+        self,
+        config: "PretrainedConfig",
+        batch_size: int = None,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[Union[torch.device, str]] = None,
+        max_batch_size: Optional[int] = None,
+        conv_states: Optional[List[torch.Tensor]] = None,
+        ssm_states: Optional[List[torch.Tensor]] = None,
+    ):
+        self.dtype = dtype
+        self.max_batch_size = batch_size or max_batch_size
+        self.intermediate_size = config.intermediate_size
+        self.ssm_state_size = config.state_size
+        self.conv_kernel_size = config.conv_kernel
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+
+        if conv_states is not None:
+            self.conv_states = conv_states
+        else:
+            self.conv_states = []
+            for _ in range(config.num_hidden_layers):
+                conv_state: torch.Tensor = torch.zeros(
+                    self.max_batch_size, self.intermediate_size, self.conv_kernel_size, device=self.device, dtype=dtype
+                )
+                self.conv_states.append(conv_state)
+
+        if ssm_states is not None:
+            self.ssm_states = ssm_states
+        else:
+            self.ssm_states: List[torch.Tensor] = []
+            for _ in range(config.num_hidden_layers):
+                ssm_state: torch.Tensor = torch.zeros(
+                    self.max_batch_size,
+                    self.intermediate_size,
+                    self.ssm_state_size,
+                    device=self.device,
+                    dtype=dtype,
+                )
+
+                self.ssm_states.append(ssm_state)
+
+
+@dataclass
+class MambaOutput(ModelOutput):
+    """
+    Class for the MAMBA model outputs.
+    Args:
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+        cache_params (`MambaCache`):
+            The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
+            avoid providing the old `input_ids`.
+            Includes both the State space model state matrices after the selective scan, and the Convolutional states
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+    """
+
+    logits: Optional[torch.FloatTensor] = None
+    cache_params: Optional[OVMambaCache] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+
 class OVMambaForCausalLM(GenerationMixin):
     def __init__(
         self,
@@ -289,7 +357,7 @@ class OVMambaForCausalLM(GenerationMixin):
         self.int4_compress = int4_compress
 
         if int4_compress:
-            self.llm_model = core.read_model(Path(f"{ov_model_path}/lm_stateful_int4.xml"))
+            self.llm_model = core.read_model(Path(f"{ov_model_path}/llm_stateful_int4.xml"))
             self.llm_compiled_model = core.compile_model(self.llm_model, device)
         else:
             self.llm_model = core.read_model(Path(f"{ov_model_path}/llm_stateful.xml"))
@@ -308,10 +376,6 @@ class OVMambaForCausalLM(GenerationMixin):
         self.next_beam_idx = None
         self.main_input_name = "input_ids"
         self._supports_cache_class = False
-
-        self.llm_embd = core.read_model(Path(f"{ov_model_path}/llm_embd.xml"))
-        self.llm_embd_compiled_model = core.compile_model(self.llm_embd, device)
-        self.llm_embd_request = self.llm_embd_compiled_model.create_infer_request()
         
         self.tokenizer = AutoTokenizer.from_pretrained(ov_model_path, trust_remote_code=True)
 
@@ -320,113 +384,129 @@ class OVMambaForCausalLM(GenerationMixin):
     def can_generate(self):
         """Returns True to validate the check that the model using `GenerationMixin.generate()` can indeed generate."""
         return True
-    
-    def _reorder_cache(self, past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
-        self.next_beam_idx = np.array(beam_idx)  # save beam_idx to be used as an input in the next iteration
-        return past_key_values
-    
-    def llm_embd_run(self, input_ids):
-        llm_embd_inputs = {}
-        llm_embd_inputs['input_ids'] = input_ids
-
-        self.llm_embd_request.start_async(llm_embd_inputs, share_inputs=True)
-        self.llm_embd_request.wait()
-
-        return torch.from_numpy(self.llm_embd_request.get_tensor("inputs_embeds").data)
 
     def __call__(
         self,
         input_ids: torch.LongTensor = None,
-        inputs_embeds: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        cache_params=None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> CausalLMOutputWithPast:
+    ) -> MambaOutput:
         return self.forward(
             input_ids,
-            inputs_embeds,
             attention_mask,
-            past_key_values,
-            position_ids,
+            cache_params,
+            use_cache,
+            cache_position,
             **kwargs,
         )
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor,
-        inputs_embeds: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = False,
-        use_cache: Optional[bool] = True,
-        **kwargs,
-    ) -> CausalLMOutputWithPast:
-        """General inference method"""
-        inputs_dict = {}
-        if past_key_values is not None:
-            inputs_embeds = self.llm_embd_run(input_ids)
-            inputs_dict['inputs_embeds'] = inputs_embeds
-        else:
-            self.past_len = 0
-            self.llm_request.reset_state()
-            inputs_dict['inputs_embeds'] = inputs_embeds
-
-        batch_size = inputs_embeds.shape[0]
-        if "beam_idx" in self.input_names:
-            inputs_dict["beam_idx"] = self.next_beam_idx if self.next_beam_idx is not None else np.arange(batch_size, dtype=int)
-
-        # print("inputs_dict: ", inputs_dict)
-        # print(self.input_names)
-        start = time.perf_counter()
-        self.llm_request.start_async(inputs_dict, share_inputs=True)
-        self.llm_request.wait()
-        end = time.perf_counter()
-
-        generation_time = (end - start) * 1000
-        self.llm_infer_list.append(generation_time)
-
-        past_key_values = ((),)
-        self.past_len += inputs_dict["inputs_embeds"].shape[1]
-
-        print('logits: ', self.llm_request.get_tensor("logits").data)
-        return CausalLMOutputWithPast(
-            loss=None,
-            logits=torch.from_numpy(self.llm_request.get_tensor("logits").data),
-            past_key_values=past_key_values,
-            hidden_states=None,
-            attentions=None,
-        )
     
+    def forward(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            attention_mask: Optional[torch.LongTensor] = None,
+            cache_params=None,
+            use_cache: Optional[bool] = None,
+            cache_position: Optional[torch.Tensor] = None,
+            **kwargs,
+        ):
+            inputs = {"input_ids": input_ids.cpu().numpy()}
+            if "cache_position" in self.input_names:
+                inputs["cache_position"] = cache_position.cpu().numpy()
+            if "attention_mask" in self.input_names:
+                inputs["attention_mask"] = cache_position.cpu().numpy()
+
+            if cache_params is None:
+                # This is the first iteration in a sequence, reset all states
+                if self.llm_request is not None:
+                    self.llm_request.reset_state()
+                self._past_length = 0
+
+            ssm_states, conv_states = [], []
+            self.llm_request.start_async(inputs, share_inputs=True)
+            self.llm_request.wait()
+            logits = torch.from_numpy(self.llm_request.get_tensor("logits").data)
+            print("logits: ", logits)
+
+
+            self._past_length += input_ids.shape[1]
+            cache_params = OVMambaCache(self.config, input_ids.shape[0], conv_states=conv_states, ssm_states=ssm_states)
+
+            return MambaOutput(logits=logits, cache_params=cache_params)
+
+    def _update_model_kwargs_for_generation(
+        self, 
+        outputs: ModelOutput, 
+        model_kwargs: Dict[str, Any], 
+        num_new_tokens: int = 1, 
+        **kwargs
+    ) -> Dict[str, Any]:
+        model_kwargs["cache_params"] = outputs.get("cache_params", None)
+        if (
+            model_kwargs.get("use_cache", True)
+            and "cache_position" in model_kwargs
+            and model_kwargs["cache_position"] is not None
+        ):
+            model_kwargs["cache_position"] = model_kwargs["cache_position"][-1:] + num_new_tokens
+
+        if "attention_mask" in model_kwargs:
+            attention_mask = model_kwargs["attention_mask"]
+            model_kwargs["attention_mask"] = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
+            )
+
+        return model_kwargs
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
-        past_key_values=None,
-        attention_mask=None,
         inputs_embeds=None,
+        use_cache=None,
+        cache_params=None,
+        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
         **kwargs,
     ):
-        # only last token for inputs_ids if the state is passed along.
-        if past_key_values is not None:
-            input_ids = input_ids[:, -1].unsqueeze(-1)
+        # Overwitten -- uses `cache_params` as opposed to `past_key_values`
 
-        if inputs_embeds is not None and past_key_values is None:
+        if use_cache:
+            # `cache_position` should have been initialized in `generate`
+            if cache_position is None:
+                raise ValueError(
+                    "`cache_position` should not be None as it should have been initialized in "
+                    "`model.generate`, you are responsible for passing in a valid `cache_position` if "
+                    "you are calling `prepare_inputs_for_generation` directly with `use_cache=True`"
+                )
+            if cache_position[0] > 0:
+                input_ids = input_ids[:, -1].unsqueeze(-1)
+
+                if attention_mask is not None:
+                    attention_mask = None
+
+            else:
+                # we initialize the `cache_position` to full size of `conv_states` at prefill stage
+                # considering padding will be applied when input length is shorter, and truncation
+                # will be applied when it is longer, so it will be equivalent to always have it match
+                # the length of `cache_params.conv_states`, which is `config.conv_kernel`
+                cache_position = torch.arange(0, self.config.conv_kernel, device=input_ids.device)
+
+        if inputs_embeds is not None and cache_params is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-            model_inputs = {"input_ids": input_ids}
+            model_inputs = {"input_ids": input_ids.contiguous()}
+
         model_inputs.update(
             {
-                "past_key_values": past_key_values,
+                "cache_params": cache_params,
+                "use_cache": use_cache,
+                "cache_position": cache_position,
+                "attention_mask": attention_mask,
             }
         )
-       
+        print("model_inputs: ", model_inputs)
         return model_inputs
 
-    def get_input_embeds(self, input_ids=None):
-        input_embeds = self.llm_embd_run(input_ids)
-        
-        return input_embeds
 
 

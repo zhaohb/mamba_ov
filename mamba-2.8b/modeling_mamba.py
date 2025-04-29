@@ -107,6 +107,7 @@ class ConvSequenceTransform(torch.nn.Module):
             hidden_states = torch.sum(upd_conv_state * self.conv1d.weight[:, 0, :], dim=-1)
             hidden_states += self.conv_bias
             hidden_states = hidden_states.unsqueeze(-1)
+
         hidden_states = self.act(hidden_states)  # [batch, intermediate_size, seq_len]
         return hidden_states, upd_conv_state
     
@@ -161,14 +162,14 @@ class MambaMixer(nn.Module):
         self.use_bias = config.use_bias
 
         self.selective_scan = SelectiveScan()
-        conv_transform = ConvSequenceTransform(
+        self.conv_transform = ConvSequenceTransform(
             self.conv_kernel_size,
             self.use_conv_bias,
             self.conv1d,
             self.act,
             self.conv1d.bias,
         )
-        self.conv_sequence_transform = conv_transform
+        self.conv_sequence_transform = torch.jit.script(self.conv_transform)
 
     def forward(
         self,
@@ -256,12 +257,10 @@ class MambaMixer(nn.Module):
 
         if cache_params is not None:
             cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
-            # cache_params.ssm_states[self.layer_idx] = ssm_state.clone()
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_output.transpose(1, 2))  # [batch, seq_len, hidden_size]
         return contextualized_states
-
 
 class MambaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -583,7 +582,7 @@ class MambaModel(MambaPreTrainedModel):
             cache_params=cache_params if use_cache else None,
             hidden_states=all_hidden_states,
         )
-    
+ 
 class MambaCacheWrap(MambaCache):
     def __init__(
         self,
@@ -596,7 +595,7 @@ class MambaCacheWrap(MambaCache):
         ssm_states: Optional[List[torch.Tensor]] = None,
     ):
         self.dtype = dtype
-        self.max_batch_size = batch_size or max_batch_size
+        self.max_batch_size = 2
         self.intermediate_size = config.intermediate_size
         self.ssm_state_size = config.state_size
         self.conv_kernel_size = config.conv_kernel
@@ -749,6 +748,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         config_class=_CONFIG_FOR_DOC,
     )
     def orig_forward(
+
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
@@ -822,12 +822,6 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         result = self.orig_forward(
             input_ids=input_ids, cache_position=cache_position, cache_params=cache_params, use_cache=use_cache, return_dict=True
         )
-        # breakpoint()
-        if use_cache:
-            return (result.logits,) + (result.cache_params.ssm_states,) + (result.cache_params.conv_states,)
-            # return {
-            #     "logits": list(result.logits),
-            #     "ssm_states": result.cache_params.ssm_states,
-            #     "conv_states": result.cache_params.conv_states,
-            # }
-        return result
+
+        return (result.logits,) + (result.cache_params.ssm_states,) + (result.cache_params.conv_states,)
+
